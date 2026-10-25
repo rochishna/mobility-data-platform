@@ -1,0 +1,24 @@
+[project]
+name = "mobility-data-platform"
+version = "0.1.0"
+description = "Fault-tolerant, metadata-driven ingestion platform for NYC mobility data"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1",
+    "polars>=1.0",
+    "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
