@@ -1,0 +1,52 @@
+# Data contract for NYC TLC Yellow Taxi trip records.
+# Onboarding a new file-based source = writing a file like this one, not new pipeline code.
+#
+# Rules marked "PROVISIONAL" are educated guesses until the real-data profile
+# (docs/profile_*.md) confirms or changes them. Record each decision in docs/DATA_QUIRKS.md.
+source: tlc_yellow
+format: parquet
+schema_version: 1
+
+# raw column -> canonical name and type.
+# required: missing column = whole batch rejected; null value = row quarantined.
+# Raw columns not listed are "additive": allowed, recorded in run metadata, not loaded.
+columns:
+  VendorID:              {name: vendor_id,        type: int64,    required: true}
+  tpep_pickup_datetime:  {name: pickup_datetime,  type: datetime, required: true}
+  tpep_dropoff_datetime: {name: dropoff_datetime, type: datetime, required: true}
+  passenger_count:       {name: passenger_count,  type: float64,  required: false}
+  trip_distance:         {name: trip_distance,    type: float64,  required: true}
+  RatecodeID:            {name: ratecode_id,      type: float64,  required: false}
+  PULocationID:          {name: pu_location_id,   type: int64,    required: true}
+  DOLocationID:          {name: do_location_id,   type: int64,    required: true}
+  payment_type:          {name: payment_type,     type: int64,    required: false}
+  fare_amount:           {name: fare_amount,      type: float64,  required: true}
+  total_amount:          {name: total_amount,     type: float64,  required: true}
+
+# TLC publishes no trip ID. This candidate key is an assumption the profiler tests.
+# Rows sharing a key: the first (deterministic order) is kept, the rest are quarantined.
+primary_key: [vendor_id, pickup_datetime, dropoff_datetime, pu_location_id, do_location_id, fare_amount]
+
+# One logical partition = one month of pickups. A rerun replaces exactly this partition.
+partition:
+  column: pickup_month
+  derived_from: pickup_datetime
+  grain: month
+
+# Row rules: SQL boolean expressions. A row failing any rule is quarantined with the rule names.
+quality_rules:
+  - name: dropoff_not_before_pickup
+    expr: "dropoff_datetime >= pickup_datetime"
+  - name: duration_under_24h             # PROVISIONAL
+    expr: "dropoff_datetime - pickup_datetime <= INTERVAL 24 HOUR"
+  - name: distance_in_range              # PROVISIONAL: upper bound
+    expr: "trip_distance >= 0 AND trip_distance < 500"
+  - name: pickup_in_logical_month
+    expr: "pickup_month = :logical_partition"
+  # Negative fares are NOT rejected here on purpose: they may be refunds/adjustments.
+  # Decide after profiling; until then they flow through and are counted.
+
+# Batch gates: breaching one fails the whole run and publishes nothing.
+batch_gates:
+  max_quarantine_ratio: 0.05             # PROVISIONAL: set from the real profile
+  min_rows: 1
