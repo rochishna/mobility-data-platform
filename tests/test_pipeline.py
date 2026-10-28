@@ -8,7 +8,7 @@ from datetime import datetime
 import polars as pl
 import pytest
 
-from factories import CONTRACT, clean_trips, trip
+from factories import CONTRACT, clean_trips, small_batch_contract, trip
 from mdp import pipeline
 from mdp.config import load_source_config
 from mdp.contracts import ContractError
@@ -17,7 +17,7 @@ from mdp.pipeline import FAULT_POINTS, GateError, InjectedFault, Lake, run
 
 @pytest.fixture(scope="module")
 def cfg():
-    return load_source_config(CONTRACT)
+    return small_batch_contract()
 
 
 def january_rows():
@@ -148,7 +148,8 @@ def test_gate_breach_publishes_nothing_and_keeps_prior(tmp_path, cfg, jan_file):
     lake = Lake(tmp_path / "lake")
     run(lake, cfg, jan_file, "2025-01")
     good = lake.read_curated(cfg, "2025-01")
-    mostly_bad = clean_trips(5) + [trip(trip_distance=-1.0, PULocationID=i) for i in range(5)]
+    mostly_bad = clean_trips(5) + [trip(tpep_dropoff_datetime=datetime(2025, 1, 15, 9, 0), PULocationID=i)
+                                   for i in range(5)]
     with pytest.raises(GateError, match="quarantine ratio"):
         run(lake, cfg, write(tmp_path, "bad.parquet", mostly_bad), "2025-01")
     assert lake.read_curated(cfg, "2025-01").equals(good)
@@ -181,9 +182,25 @@ def test_unknown_fault_point_rejected(tmp_path, cfg, jan_file):
 
 # ---------- CLI ----------
 
+def test_published_rows_carry_flags(tmp_path, cfg):
+    lake = Lake(tmp_path / "lake")
+    rows = clean_trips(20) + [trip(fare_amount=-5.0, total_amount=-8.0)]
+    run(lake, cfg, write(tmp_path, "f.parquet", rows), "2025-01")
+    out = lake.read_curated(cfg, "2025-01")
+    assert out.height == 21
+    assert out["is_reversal"].sum() == 1
+
+
+def test_production_gates_reject_tiny_batch(tmp_path, jan_file):
+    """The real contract's min_rows gate stops a truncated download from replacing a month."""
+    with pytest.raises(GateError, match="minimum"):
+        run(Lake(tmp_path / "lake"), load_source_config(CONTRACT), jan_file, "2025-01")
+
+
 def test_cli_end_to_end(tmp_path, cfg, jan_file, capsys):
     from mdp.ingest import main
-    args = ["--contract", CONTRACT, "--file", str(jan_file), "--month", "2025-01", "--lake", str(tmp_path / "lake")]
+    big = write(tmp_path, "big.parquet", clean_trips(1200))
+    args = ["--contract", CONTRACT, "--file", str(big), "--month", "2025-01", "--lake", str(tmp_path / "lake")]
     assert main(args) == 0
     assert "committed" in capsys.readouterr().out
     assert main(args) == 0

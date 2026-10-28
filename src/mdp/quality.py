@@ -52,3 +52,13 @@ def dedupe(df: pl.DataFrame, primary_key: tuple[str, ...]) -> tuple[pl.DataFrame
         pl.lit("duplicate_key").alias("quarantine_reason")
     )
     return unique, dups
+
+
+def add_flags(df: pl.DataFrame, cfg: SourceConfig) -> pl.DataFrame:
+    """Add one boolean column per contract flag. NULL counts as False (not flagged)."""
+    if not cfg.flags:
+        return df
+    cols = ", ".join(f"coalesce(({f.expr}), FALSE) AS {f.name}" for f in cfg.flags)
+    with duckdb.connect() as con:
+        con.register("batch", df.to_arrow())
+        return con.sql(f"SELECT *, {cols} FROM batch").pl()

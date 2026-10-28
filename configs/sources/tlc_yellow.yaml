@@ -1,11 +1,11 @@
 # Data contract for NYC TLC Yellow Taxi trip records.
 # Onboarding a new file-based source = writing a file like this one, not new pipeline code.
 #
-# Rules marked "PROVISIONAL" are educated guesses until the real-data profile
-# (docs/profile_*.md) confirms or changes them. Record each decision in docs/DATA_QUIRKS.md.
+# Every rule, flag and threshold below is backed by evidence in docs/DATA_QUIRKS.md
+# (profiled on January 2025: 3,475,226 rows). Code meanings: TLC data dictionary, March 18, 2025.
 source: tlc_yellow
 format: parquet
-schema_version: 1
+schema_version: 2
 
 # raw column -> canonical name and type.
 # required: missing column = whole batch rejected; null value = row quarantined.
@@ -14,18 +14,19 @@ columns:
   VendorID:              {name: vendor_id,        type: int64,    required: true}
   tpep_pickup_datetime:  {name: pickup_datetime,  type: datetime, required: true}
   tpep_dropoff_datetime: {name: dropoff_datetime, type: datetime, required: true}
-  passenger_count:       {name: passenger_count,  type: float64,  required: false}
+  passenger_count:       {name: passenger_count,  type: float64,  required: false}  # null on Flex Fare trips
   trip_distance:         {name: trip_distance,    type: float64,  required: true}
-  RatecodeID:            {name: ratecode_id,      type: float64,  required: false}
+  RatecodeID:            {name: ratecode_id,      type: float64,  required: false}  # null on Flex Fare trips
   PULocationID:          {name: pu_location_id,   type: int64,    required: true}
   DOLocationID:          {name: do_location_id,   type: int64,    required: true}
   payment_type:          {name: payment_type,     type: int64,    required: false}
   fare_amount:           {name: fare_amount,      type: float64,  required: true}
   total_amount:          {name: total_amount,     type: float64,  required: true}
 
-# TLC publishes no trip ID. This candidate key is an assumption the profiler tests.
-# Rows sharing a key: the first (deterministic order) is kept, the rest are quarantined.
-primary_key: [vendor_id, pickup_datetime, dropoff_datetime, pu_location_id, do_location_id, fare_amount]
+# TLC publishes no trip ID. The original key (without total_amount) collided 301 times in Jan 2025,
+# and 294 of those 299 groups were a charge and its reversal (+X / -X) that net to zero.
+# Adding total_amount separates them: 1 collision remains, a genuine conflicting re-send.
+primary_key: [vendor_id, pickup_datetime, dropoff_datetime, pu_location_id, do_location_id, fare_amount, total_amount]
 
 # One logical partition = one month of pickups. A rerun replaces exactly this partition.
 partition:
@@ -33,20 +34,31 @@ partition:
   derived_from: pickup_datetime
   grain: month
 
-# Row rules: SQL boolean expressions. A row failing any rule is quarantined with the rule names.
+# REJECT: the row's core facts are unusable. Quarantined with the rule names.
 quality_rules:
-  - name: dropoff_not_before_pickup
+  - name: dropoff_not_before_pickup     # 124 rows in Jan 2025
     expr: "dropoff_datetime >= pickup_datetime"
-  - name: duration_under_24h             # PROVISIONAL
+  - name: duration_under_24h            # 20 rows; a taxi trip over a day is a stuck meter
     expr: "dropoff_datetime - pickup_datetime <= INTERVAL 24 HOUR"
-  - name: distance_in_range              # PROVISIONAL: upper bound
-    expr: "trip_distance >= 0 AND trip_distance < 500"
-  - name: pickup_in_logical_month
+  - name: pickup_in_logical_month       # 22 rows: late Dec 31 and one Feb 1 00:00 pickup
     expr: "pickup_month = :logical_partition"
-  # Negative fares are NOT rejected here on purpose: they may be refunds/adjustments.
-  # Decide after profiling; until then they flow through and are counted.
+
+# FLAG: the row is a real record, but analysts must know about this. Kept, with a boolean column.
+flags:
+  - name: is_reversal                   # 144K negative fares: reversals of a charge, refunds, Flex Fare adjustments
+    expr: "fare_amount < 0 OR total_amount < 0"
+  - name: is_flex_fare                  # payment_type 0 = Flex Fare (15.5% of rows)
+    expr: "payment_type = 0"
+  - name: suspect_distance              # meter readings up to 276,423 mi; the fare is still real
+    expr: "trip_distance < 0 OR trip_distance > 200"
+  - name: zero_distance                 # 90,893 rows: cancellations, no-moves, meter resets
+    expr: "trip_distance = 0"
+  - name: unknown_zone                  # zones 264/265 = TLC "Unknown" / "Outside of NYC"
+    expr: "pu_location_id IN (264, 265) OR do_location_id IN (264, 265)"
 
 # Batch gates: breaching one fails the whole run and publishes nothing.
 batch_gates:
-  max_quarantine_ratio: 0.05             # PROVISIONAL: set from the real profile
-  min_rows: 1
+  # Jan 2025 rejected ~0.005% of rows. 0.1% gives 20x headroom while still
+  # failing loudly if a source change suddenly breaks a meaningful share of rows.
+  max_quarantine_ratio: 0.001
+  min_rows: 1000

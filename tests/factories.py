@@ -1,7 +1,19 @@
 """Builders for synthetic TLC rows, shared by tests."""
+from dataclasses import replace
 from datetime import datetime, timedelta
 
+from mdp.config import load_source_config
+
 CONTRACT = "configs/sources/tlc_yellow.yaml"
+
+
+def small_batch_contract():
+    """The real contract with gates loosened for tiny test batches.
+
+    The production gates (min 1,000 rows, max 0.1% quarantined) are tuned for 3.5M-row months;
+    a 60-row fixture with 3 planted bad rows would trip them. Rules and flags are unchanged.
+    """
+    return replace(load_source_config(CONTRACT), max_quarantine_ratio=0.05, min_rows=1)
 
 
 def trip(**overrides):

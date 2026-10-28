@@ -123,7 +123,7 @@ def run(lake: Lake, cfg: SourceConfig, input_path: str | Path, month: str,
             pl.col(cfg.partition_derived_from).dt.strftime("%Y-%m").alias(cfg.partition_column)
         )
 
-        # 3. Row rules, then dedupe the survivors.
+        # 3. Reject rules, then dedupe the survivors.
         valid, failed = quality.split_valid(df, cfg, month)
         valid, dups = quality.dedupe(valid, cfg.primary_key)
         quarantined = pl.concat([failed, dups], how="vertical_relaxed")
@@ -144,7 +144,9 @@ def run(lake: Lake, cfg: SourceConfig, input_path: str | Path, month: str,
         if ratio > cfg.max_quarantine_ratio:
             raise GateError(f"quarantine ratio {ratio:.2%} exceeds {cfg.max_quarantine_ratio:.2%}")
 
-        # 5. Publish, sorted so identical input always yields identical files.
+        # 5. Flag kept-but-notable rows, then publish, sorted so identical input
+        #    always yields identical files.
+        valid = quality.add_flags(valid, cfg)
         valid = valid.sort(valid.columns, nulls_last=True)
         _publish(valid, lake.curated_dir(cfg, month), bid)
         stats.rows_published = valid.height

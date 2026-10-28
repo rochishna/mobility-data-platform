@@ -41,6 +41,7 @@ class SourceConfig:
     partition_column: str
     partition_derived_from: str
     quality_rules: tuple[QualityRule, ...]
+    flags: tuple[QualityRule, ...]   # kept rows, marked with a boolean column
     max_quarantine_ratio: float
     min_rows: int
 
@@ -86,6 +87,13 @@ def load_source_config(path: str | Path) -> SourceConfig:
         if len({r.name for r in rules}) != len(rules):
             raise ConfigError("quality rule names must be unique")
 
+        flags = tuple(QualityRule(f["name"], f["expr"]) for f in raw.get("flags", []))
+        flag_names = [f.name for f in flags]
+        if len(set(flag_names)) != len(flag_names):
+            raise ConfigError("flag names must be unique")
+        if clash := set(flag_names) & (set(canonical) | {part["column"]}):
+            raise ConfigError(f"flag names clash with columns: {sorted(clash)}")
+
         return SourceConfig(
             source=raw["source"],
             format=raw["format"],
@@ -95,6 +103,7 @@ def load_source_config(path: str | Path) -> SourceConfig:
             partition_column=part["column"],
             partition_derived_from=part["derived_from"],
             quality_rules=rules,
+            flags=flags,
             max_quarantine_ratio=ratio,
             min_rows=int(gates.get("min_rows", 0)),
         )
