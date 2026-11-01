@@ -24,13 +24,16 @@ def setup(tmp_path, monkeypatch):
         pl.DataFrame(rows).write_parquet(path)
         return run(lake, cfg, path, month, **kw)
 
+    reviews = tmp_path / "reviews.csv"
+
     def build():
-        return warehouse.build(lake.root, db, CONTRACT)
+        return warehouse.build(lake.root, db, CONTRACT, reviews_csv=reviews)
 
     def q(sql):
         with duckdb.connect(str(db), read_only=True) as con:
             return con.execute(sql).fetchall()
 
+    build.reviews = reviews
     return lake, cfg, ingest, build, q
 
 
@@ -151,3 +154,69 @@ def test_late_rows_from_crashed_run_are_ignored(setup):
         ingest("jan.parquet", clean_trips(10) + [dec_trip(30)], "2025-01", fault_point="after_publish_before_commit")
     build()
     assert q("SELECT count(*) FROM fact_trip WHERE pickup_month = '2024-12'") == [(5,)]
+
+
+# ---------- review queue (decision: Rochishna, held until reviewed) ----------
+
+def bad_fare():
+    return trip(fare_amount=863372.12, total_amount=863380.37, PULocationID=138,
+                tpep_dropoff_datetime=datetime(2025, 1, 15, 10, 5, 24))
+
+
+def write_review(path, decision):
+    path.write_text(
+        "vendor_id,pickup_datetime,dropoff_datetime,pu_location_id,do_location_id,fare_amount,total_amount,"
+        "decision,reviewer,reviewed_on,note\n"
+        f"1,2025-01-15 10:00:00,2025-01-15 10:05:24,138,200,863372.12,863380.37,{decision},Rochishna,2026-11-01,test\n")
+
+
+def test_suspect_trip_is_held_out_of_rollup_but_kept_in_fact(setup):
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10) + [bad_fare()], "2025-01")
+    build()
+    assert q("SELECT count(*) FROM fact_trip") == [(11,)]                       # kept
+    assert q("SELECT sum(trips), sum(net_revenue) FROM agg_daily_zone_hour") == [(10, 240.0)]   # not counted
+    assert q("SELECT count(*) FROM review_queue") == [(1,)]
+
+
+def test_approved_trip_counts_after_rebuild(setup):
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10) + [bad_fare()], "2025-01")
+    build()
+    write_review(build.reviews, "approved")
+    assert build() == {"2025-01": 11}                                            # review change -> rollup rebuilt
+    assert q("SELECT sum(trips) FROM agg_daily_zone_hour") == [(11,)]
+    assert q("SELECT count(*) FROM review_queue") == [(0,)]
+
+
+def test_rejected_trip_stays_out_and_leaves_queue(setup):
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10) + [bad_fare()], "2025-01")
+    write_review(build.reviews, "rejected")
+    build()
+    assert q("SELECT sum(trips) FROM agg_daily_zone_hour") == [(10,)]
+    assert q("SELECT count(*) FROM review_queue") == [(0,)]
+    assert q("SELECT count(*) FROM fact_trip WHERE suspect_fare") == [(1,)]     # still kept for audit
+
+
+def test_invalid_review_decision_is_refused(setup):
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10), "2025-01")
+    write_review(build.reviews, "maybe")
+    with pytest.raises(ValueError, match="approved"):
+        build()
+
+
+def test_review_cli_round_trip(setup, tmp_path):
+    from mdp import review
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10) + [bad_fare()], "2025-01")
+    build()
+    db = str(lake.root.parent / "wh.duckdb")
+    todo = tmp_path / "todo.csv"
+    assert review.export(db, todo) == 1
+    text = todo.read_text().replace(",,,,", ",rejected,Rochishna,,", 1)       # fill decision + reviewer
+    todo.write_text(text)
+    assert review.apply(todo, build.reviews) == (1, 0)
+    build()
+    assert q("SELECT count(*) FROM review_queue") == [(0,)]

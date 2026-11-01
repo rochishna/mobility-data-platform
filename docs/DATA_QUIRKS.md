@@ -34,8 +34,16 @@ The obvious move, rejecting negative fares and deduplicating on a trip key, woul
 | 12 | Zones 264/265 | 28,357 | 0.82% | Dictionary: "Unknown" and "Outside of NYC" | **Flag** `unknown_zone` |
 | 13 | RatecodeID = 99 | 41,963 | 1.21% | Dictionary: "Null/unknown" | **Keep** |
 | 14 | Vendors 6 and 7 | 1,695 | 0.05% | New providers (Myle, Helix), present in the 2025 dictionary | **Keep** |
-| 15 | Fare > $1,000 | 3 | 0.0001% | Too few to rule on | **Keep** |
+| 15 | Fare far beyond the trip's duration | 21 | 0.0006% | One $863,372.12 fare for 1.6 mi in 5.4 min (payment: Dispute), worth ~1% of the month's net revenue and the whole Jan 20 Queens spike. 20 zero-mile "Negotiated fare" trips of $500–950, mostly cash: possibly pre-agreed fares logged without the meter. A 189-mile, $1,309 ride ($7.20/min) is expensive but plausible | **Hold for review** (`suspect_fare`: more than $500/min, trips under a minute counted as one). Kept in `fact_trip`, excluded from revenue and trip counts until approved in `configs/reviews/tlc_yellow.csv`. Decision by Rochishna, mirroring how reviewed exceptions work in production finance data |
 | 16 | `cbd_congestion_fee` in dictionary, absent from this file | — | — | Congestion pricing began Jan 5, 2025. Schema will drift when it appears | Contract treats it as **additive**: accepted and recorded, not loaded |
+
+## Why not a z-score?
+
+The textbook outlier rule (fare more than 3 standard deviations above the mean) caught the $863K row only by
+luck: that one row inflated the standard deviation from $18 to $463, pushing the cutoff to $1,407. That's
+**masking**. With the row removed, the same rule flagged 37,209 ordinary trips, mostly $70 flat-rate airport
+fares. Normalizing by the trip's own duration separates the cases cleanly: median $1.16/min, 99.99th percentile
+$60.53/min, the bad row $159,884/min.
 
 ## Gates
 

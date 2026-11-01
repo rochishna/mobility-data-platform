@@ -5,6 +5,7 @@ at load time, so a broken config fails before any data is touched.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,14 @@ class SourceConfig:
     flags: tuple[QualityRule, ...]   # kept rows, marked with a boolean column
     max_quarantine_ratio: float
     min_rows: int
+
+    @property
+    def fingerprint(self) -> str:
+        """Hash of everything that changes what the pipeline OUTPUTS: columns, key, partition, rules, flags.
+        Batch gates are excluded: they decide whether a run publishes, not what it publishes."""
+        parts = [self.source, self.format, self.schema_version, self.columns, self.primary_key,
+                 self.partition_column, self.partition_derived_from, self.quality_rules, self.flags]
+        return hashlib.sha256(repr(parts).encode()).hexdigest()[:12]
 
     @property
     def required_raw(self) -> frozenset[str]:

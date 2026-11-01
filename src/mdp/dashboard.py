@@ -83,6 +83,14 @@ class Warehouse:
         r["reversal_share"] = (r["gross"] - r["net"]) / r["gross"] if r["gross"] else 0.0
         return r
 
+    def held(self, borough: str | None = None) -> dict:
+        """Trips held out of every number on the dashboard until a reviewer decides."""
+        where, params = self._borough_filter(borough)
+        return self._rows(f"""
+            SELECT count(*) AS trips, coalesce(sum(q.total_amount), 0) AS amount
+            FROM review_queue q JOIN dim_location l ON l.location_id = q.pu_location_id
+            WHERE TRUE {where}""", params)[0]
+
     def daily(self, borough: str | None = None) -> list[dict]:
         where, params = self._borough_filter(borough)
         return self._rows(f"""
@@ -243,7 +251,7 @@ def create_app(db_path: str) -> Dash:
             dcc.Dropdown(id="borough", options=[ALL] + wh.boroughs(), value=ALL, clearable=False, className="filter"),
         ]),
         html.Div(className="kpis", children=[
-            _card("Trips", "kpi-trips"),
+            _card("Trips", "kpi-trips", "kpi-trips-note"),
             _card("Gross revenue", "kpi-gross", "kpi-gross-note"),
             _card("Net revenue", "kpi-net", "kpi-net-note"),
             _card("Avg trip distance", "kpi-miles"),
@@ -264,19 +272,23 @@ def create_app(db_path: str) -> Dash:
                    dcc.Graph(id="zonehourly", config={"displayModeBar": False})),
         ]),
         html.Footer("Reversals: negative charges that cancel or refund an earlier charge (see docs/DATA_QUIRKS.md). "
-                    "Distance excludes meter readings flagged as implausible."),
+                    "Distance excludes meter readings flagged as implausible. Trips charging over $500 per minute are "
+                    "held out of all figures until reviewed (python -m mdp.review)."),
     ])
 
     @app.callback(
-        Output("kpi-trips", "children"), Output("kpi-gross", "children"), Output("kpi-gross-note", "children"),
+        Output("kpi-trips", "children"), Output("kpi-trips-note", "children"), Output("kpi-gross", "children"), Output("kpi-gross-note", "children"),
         Output("kpi-net", "children"), Output("kpi-net-note", "children"), Output("kpi-miles", "children"),
         Output("daily", "figure"), Output("heatmap", "figure"), Output("topzones", "figure"),
         Input("borough", "value"),
     )
     def update_overview(borough):
         k = wh.kpis(borough)
+        h = wh.held(borough)
+        held_note = (f"{h['trips']:,} held for review (${h['amount']:,.0f}), not counted" if h["trips"]
+                     else "none held for review")
         return (
-            f"{k['trips']:,}", f"${k['gross'] / 1e6:,.2f}M", "all charges",
+            f"{k['trips']:,}", held_note, f"${k['gross'] / 1e6:,.2f}M", "all charges",
             f"${k['net'] / 1e6:,.2f}M", f"{k['reversal_share']:.1%} reversed or refunded",
             f"{k['avg_miles']:.2f} mi",
             daily_figure(wh.daily(borough)), heatmap_figure(wh.heatmap(borough)),

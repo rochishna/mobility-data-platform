@@ -69,6 +69,26 @@ def test_batch_id_is_deterministic(tmp_path, cfg, jan_file):
 
 # ---------- idempotency ----------
 
+def test_rule_change_reprocesses_a_loaded_month(tmp_path, cfg, jan_file):
+    """Same file, new rules: the month must be rebuilt, or it would silently keep the old rules' output."""
+    from dataclasses import replace
+    from mdp.config import QualityRule
+    lake = Lake(tmp_path / "lake")
+    run(lake, cfg, jan_file, "2025-01")
+    stricter = replace(cfg, flags=cfg.flags + (QualityRule("is_long_trip", "trip_distance > 3"),))
+    assert stricter.fingerprint != cfg.fingerprint
+    result = run(lake, stricter, jan_file, "2025-01")
+    assert result.status == "committed"
+    assert "is_long_trip" in lake.read_curated(stricter, "2025-01").columns
+
+
+def test_gate_change_alone_does_not_reprocess(tmp_path, cfg, jan_file):
+    from dataclasses import replace
+    lake = Lake(tmp_path / "lake")
+    run(lake, cfg, jan_file, "2025-01")
+    assert run(lake, replace(cfg, max_quarantine_ratio=0.04), jan_file, "2025-01").status == "skipped"
+
+
 def test_rerun_same_file_is_noop(tmp_path, cfg, jan_file):
     lake = Lake(tmp_path / "lake")
     run(lake, cfg, jan_file, "2025-01")

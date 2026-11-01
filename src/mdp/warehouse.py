@@ -10,6 +10,8 @@ Rules:
   * Only partitions with a 'committed' manifest record are loaded. A half-finished run is invisible here.
   * Loading a month is delete-then-insert inside one transaction, so reloading is idempotent and a
     failure mid-load leaves the previous version of that month in place.
+  * Trips flagged suspect_fare are kept in fact_trip but HELD: excluded from the rollup (revenue and trip
+    counts) until a reviewer approves them in the review file. Pending ones appear in review_queue.
   * Late arrivals (valid trips that landed in another month's file) are added to their real month,
     unless that month's own file already contains the same trip key.
   * Code meanings for vendor / payment / rate code come from the TLC yellow taxi data dictionary
@@ -21,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 
 import duckdb
@@ -63,14 +66,21 @@ CREATE TABLE IF NOT EXISTS fact_trip (
     is_flex_fare      BOOLEAN,
     suspect_distance  BOOLEAN,
     zero_distance     BOOLEAN,
-    unknown_zone      BOOLEAN
+    unknown_zone      BOOLEAN,
+    suspect_fare      BOOLEAN
 );
+CREATE TABLE IF NOT EXISTS review_decision (
+    vendor_id INTEGER, pickup_datetime TIMESTAMP, dropoff_datetime TIMESTAMP, pu_location_id INTEGER,
+    do_location_id INTEGER, fare_amount DOUBLE, total_amount DOUBLE,
+    decision VARCHAR, reviewer VARCHAR, reviewed_on DATE, note VARCHAR
+);
+CREATE TABLE IF NOT EXISTS wh_meta (key VARCHAR PRIMARY KEY, value VARCHAR);
 CREATE TABLE IF NOT EXISTS agg_daily_zone_hour (
     pickup_month    VARCHAR,
     pickup_date_key INTEGER,
     pickup_hour     INTEGER,
     pu_location_id  INTEGER,
-    trips           BIGINT,     -- trip records excluding reversal rows
+    trips           BIGINT,     -- trip records excluding reversal rows and trips held for review
     gross_revenue   DOUBLE,     -- charges only: sum of positive totals
     net_revenue     DOUBLE,     -- what was actually collected: charges plus reversals/refunds
     total_distance  DOUBLE,     -- excludes suspect distances
@@ -178,7 +188,7 @@ def load_month(con: duckdb.DuckDBPyConnection, lake: Lake, cfg: SourceConfig, mo
                    CAST(ratecode_id AS INTEGER), passenger_count, trip_distance,
                    date_diff('second', pickup_datetime, dropoff_datetime) / 60.0,
                    fare_amount, total_amount,
-                   is_reversal, is_flex_fare, suspect_distance, zero_distance, unknown_zone
+                   is_reversal, is_flex_fare, suspect_distance, zero_distance, unknown_zone, suspect_fare
             FROM ({source_sql})
             ORDER BY pickup_datetime, pu_location_id
         """)
@@ -190,10 +200,11 @@ def load_month(con: duckdb.DuckDBPyConnection, lake: Lake, cfg: SourceConfig, mo
                    sum(total_amount),
                    sum(trip_distance) FILTER (WHERE NOT suspect_distance),
                    sum(duration_min)
-            FROM fact_trip WHERE pickup_month = ?
+            FROM fact_trip f
+            WHERE pickup_month = ? AND NOT {HELD}
             GROUP BY ALL
             ORDER BY pickup_date_key, pu_location_id, pickup_hour
-        """, [month])
+        """.replace("{HELD}", HELD), [month])
         n = con.execute("SELECT count(*) FROM fact_trip WHERE pickup_month = ?", [month]).fetchone()[0]
         own = con.execute(f"SELECT count(*) FROM read_parquet('{path}')").fetchone()[0]
         con.execute("INSERT OR REPLACE INTO load_log VALUES (?, ?, ?, ?, ?, now())",
@@ -206,18 +217,62 @@ def load_month(con: duckdb.DuckDBPyConnection, lake: Lake, cfg: SourceConfig, mo
         raise
 
 
+# Review key = the trip key. A suspect trip counts only once a reviewer has approved it.
+REVIEW_KEY = ["vendor_id", "pickup_datetime", "dropoff_datetime", "pu_location_id", "do_location_id",
+              "fare_amount", "total_amount"]
+HELD = f"""(f.suspect_fare AND NOT EXISTS (
+    SELECT 1 FROM review_decision r WHERE r.decision = 'approved'
+      AND {' AND '.join(f'r.{k} = f.{k}' for k in REVIEW_KEY)}))"""
+
+REVIEW_QUEUE = f"""
+CREATE OR REPLACE VIEW review_queue AS
+SELECT f.{', f.'.join(REVIEW_KEY)}, f.trip_distance, round(f.duration_min, 2) AS duration_min,
+       f.ratecode_id, f.payment_type,
+       round(f.fare_amount / greatest(f.duration_min, 1), 2) AS fare_per_minute
+FROM fact_trip f
+WHERE f.suspect_fare AND NOT EXISTS (
+    SELECT 1 FROM review_decision r WHERE r.decision IN ('approved', 'rejected')
+      AND {' AND '.join(f'r.{k} = f.{k}' for k in REVIEW_KEY)})
+ORDER BY f.fare_amount DESC
+"""
+
+
+def _load_reviews(con: duckdb.DuckDBPyConnection, reviews_csv: str | Path | None) -> str:
+    """Replace review_decision from the CSV; return a fingerprint of its contents."""
+    con.execute("DELETE FROM review_decision")
+    if not reviews_csv or not Path(reviews_csv).exists():
+        return "none"
+    con.execute("INSERT INTO review_decision SELECT * FROM read_csv(?, header=true, columns={"
+                "'vendor_id':'INTEGER','pickup_datetime':'TIMESTAMP','dropoff_datetime':'TIMESTAMP',"
+                "'pu_location_id':'INTEGER','do_location_id':'INTEGER','fare_amount':'DOUBLE','total_amount':'DOUBLE',"
+                "'decision':'VARCHAR','reviewer':'VARCHAR','reviewed_on':'DATE','note':'VARCHAR'})",
+                [str(reviews_csv)])
+    bad = con.execute("SELECT count(*) FROM review_decision WHERE decision NOT IN ('approved', 'rejected')").fetchone()[0]
+    if bad:
+        raise ValueError(f"{reviews_csv}: {bad} rows have a decision other than 'approved' or 'rejected'")
+    return hashlib.sha256(Path(reviews_csv).read_bytes()).hexdigest()[:12]
+
+
 def late_signature(late: list[tuple[str, str]]) -> str:
     return ",".join(sorted(bid for bid, _ in late))
 
 
 def build(lake_root: str | Path, db_path: str | Path, contract: str | Path,
-          zones_csv: str | Path | None = None, months: list[str] | None = None) -> dict[str, int]:
+          zones_csv: str | Path | None = None, months: list[str] | None = None,
+          reviews_csv: str | Path | None = None) -> dict[str, int]:
     """Load every committed month (or the given ones). Months already loaded from the same batch are skipped."""
     lake = Lake(lake_root)
     cfg = load_source_config(contract)
     with duckdb.connect(str(db_path)) as con:
         con.execute(DDL)
         _seed_static_dims(con, zones_csv)
+        review_sig = _load_reviews(con, reviews_csv)
+        con.execute(REVIEW_QUEUE)
+        # New review decisions change which trips count, so every month's rollup is rebuilt.
+        prev_sig = con.execute("SELECT value FROM wh_meta WHERE key = 'review_sig'").fetchone()
+        if prev_sig is None or prev_sig[0] != review_sig:
+            con.execute("DELETE FROM load_log")
+            con.execute("INSERT OR REPLACE INTO wh_meta VALUES ('review_sig', ?)", [review_sig])
         if months is None:
             months = committed_months(lake, cfg)
         loaded = {}
@@ -239,12 +294,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--db", default="warehouse.duckdb")
     p.add_argument("--contract", default="configs/sources/tlc_yellow.yaml")
     p.add_argument("--zones", default="configs/reference/taxi_zone_lookup.csv")
+    p.add_argument("--reviews", default="configs/reviews/tlc_yellow.csv")
     args = p.parse_args(argv)
-    loaded = build(args.lake, args.db, args.contract, args.zones)
+    loaded = build(args.lake, args.db, args.contract, args.zones, reviews_csv=args.reviews)
     if not loaded:
         print("warehouse up to date")
     for month, n in loaded.items():
         print(f"loaded {month}: {n:,} fact rows")
+    with duckdb.connect(args.db, read_only=True) as con:
+        pending, amount = con.execute("SELECT count(*), coalesce(sum(total_amount), 0) FROM review_queue").fetchone()
+    if pending:
+        print(f"{pending} trips (${amount:,.2f}) held for review: python -m mdp.review --db {args.db}")
     return 0
 
 

@@ -4,7 +4,8 @@ A fault-tolerant, metadata-driven ingestion platform for NYC mobility data (TLC 
 
 > **Status:** ingestion and the star-schema warehouse are done, tested, and run on real data:
 > 3.47M January 2025 trips in 5.5 s, crash-and-rerun output byte-identical to a clean run, and dashboard
-> queries 23–33× faster from a pre-aggregated rollup, served by a Plotly Dash dashboard. AWS deployment comes next.
+> queries up to 51× faster from a pre-aggregated rollup, served by a Plotly Dash dashboard with a human review
+> queue for anomalous fares. AWS deployment comes next.
 
 ![Dashboard](docs/img/dashboard.png)
 
@@ -24,6 +25,8 @@ at every step and checks that the rerun matches a clean run exactly.
 | Reversals are never deduplicated away | key includes `total_amount`, so +X/−X pairs stay distinct | `test_charge_and_reversal_are_not_duplicates` |
 | Late-arriving trips land in their real month, never twice | held in `late/`, merged by the warehouse with an anti-join on the trip key | `test_late_rows_join_their_real_month`, `test_late_row_already_in_its_month_is_not_double_counted` |
 | The warehouse only ever shows committed data | loads read the manifest; each month reloads in one transaction | `test_uncommitted_month_is_never_loaded`, `test_late_rows_from_crashed_run_are_ignored` |
+| Anomalous fares never reach the numbers unreviewed | `suspect_fare` trips are kept but held out of the rollup until approved in a review file | `test_suspect_trip_is_held_out_of_rollup_but_kept_in_fact`, `test_approved_trip_counts_after_rebuild` |
+| Changing a rule reprocesses months already loaded | the batch id includes a fingerprint of the contract's rules | `test_rule_change_reprocesses_a_loaded_month` |
 | Same input, same output, regardless of row order | deterministic dedupe and sorted publication | `test_dedupe_is_order_independent` |
 
 ## What the real data taught it
@@ -31,7 +34,8 @@ at every step and checks that the rerun matches a clean run exactly.
 Profiling January 2025 overturned the obvious rules. 4% of fares are negative, but they're reversals and
 Flex Fare adjustments, not errors. The "duplicate" trips were charge/reversal pairs that net to $0, so
 deduplicating them would have corrupted revenue. The contract now **rejects** only rows whose core facts are
-unusable (145 of 3.47M), routes 22 **late-arriving** trips to their real month, and **flags** real-but-unusual records instead. Evidence for every decision:
+unusable (145 of 3.47M), routes 22 **late-arriving** trips to their real month, **holds** 21 anomalous fares for
+human review (one was $863,372 for a 1.6-mile ride), and **flags** real-but-unusual records instead. Evidence for every decision:
 [`docs/DATA_QUIRKS.md`](docs/DATA_QUIRKS.md).
 
 ## How a source is defined
@@ -51,7 +55,7 @@ column is filled with nulls. Unknown new columns are allowed, recorded in the ru
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,dashboard]"
-pytest                                                  # 87 tests, no download needed
+pytest                                                  # 97 tests, no download needed
 
 python scripts/download.py 2025-01
 python -m mdp.profile data/raw/yellow_tripdata_2025-01.parquet 2025-01 --out docs/profile_2025-01.md
@@ -60,6 +64,19 @@ python -m mdp.ingest --contract configs/sources/tlc_yellow.yaml \
 python -m mdp.warehouse --lake lake/ --db warehouse.duckdb      # star schema + rollup
 python benchmarks/query_tuning.py                              # writes docs/QUERY_TUNING.md
 python -m mdp.dashboard --db warehouse.duckdb                  # http://127.0.0.1:8050
+python -m mdp.review                                           # list trips held for review
+```
+
+## Review queue
+
+Trips charging more than $500 per minute are kept in `fact_trip` but **held** out of every revenue figure and
+trip count until a person decides. A z-score was tried first and rejected: the $863K outlier inflated the standard
+deviation enough to hide itself (masking). Details in [DATA_QUIRKS.md](docs/DATA_QUIRKS.md).
+
+```bash
+python -m mdp.review --export review_todo.csv   # fill decision = approved | rejected, reviewer, note
+python -m mdp.review --apply review_todo.csv    # appends decisions to configs/reviews/tlc_yellow.csv
+python -m mdp.warehouse                         # review file changed -> rollup rebuilt
 ```
 
 ## Dashboard
@@ -70,7 +87,8 @@ zone/day drill-down. Everything filters by borough.
 
 Revenue appears twice by design: **gross** (all charges) and **net** (after reversals and refunds). Neither is
 profit; the data has no costs. What it shows for January 2025: JFK is only the 4th busiest pickup zone but earns
-the most, $77 net per trip against $24 for Midtown Center.
+the most, $77 net per trip against $24 for Midtown Center. Queens still peaks on Jan 20 after the bad fare is held:
+about 14,000 trips against a normal ~9,000. Jan 20 was both MLK Day and Inauguration Day; the cause is not confirmed.
 
 ## Warehouse
 
@@ -81,9 +99,11 @@ fact table and rollup can never disagree; revenue matches to the cent.
 
 | Dashboard query | Raw Parquet | Star schema | Rollup |
 |---|---:|---:|---:|
-| Daily revenue and trips | 83.5 ms | 27.1 ms | 2.6 ms |
-| Weekday × hour demand by borough | 104.4 ms | 44.8 ms | 4.6 ms |
-| One zone, one day, by hour | 11.0 ms | 1.9 ms | 1.5 ms |
+| Daily revenue and trips | 159.0 ms | 61.9 ms | 3.1 ms |
+| Weekday × hour demand by borough | 220.2 ms | 95.0 ms | 7.1 ms |
+| One zone, one day, by hour | 21.2 ms | 4.5 ms | 1.8 ms |
+
+Raw and star queries apply the review rule on every query; the rollup applies it once, at load time.
 
 Rollups win when a query scans the whole month; sort order wins when it filters. Sorting alone made the
 drill-down 5× faster than the same data shuffled. Details: [QUERY_TUNING.md](docs/QUERY_TUNING.md).
@@ -101,6 +121,8 @@ src/mdp/pipeline.py     the ingestion run: land → check → quarantine → gat
 src/mdp/ingest.py       command-line entry point
 src/mdp/warehouse.py    star schema + rollup from committed partitions, late-arrival merge
 src/mdp/dashboard.py    Plotly Dash app: query layer, figures, layout
+src/mdp/review.py       export / apply review decisions for held trips
+configs/reviews/        reviewed exceptions (the audit trail, kept in git)
 configs/reference/      TLC taxi zone lookup (zone and borough names)
 benchmarks/             query-tuning case study
 docs/DATA_QUIRKS.md     findings from real data and the decision for each

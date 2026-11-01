@@ -34,9 +34,10 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 
-def batch_id(source: str, logical_partition: str, checksum: str) -> str:
-    """Deterministic: the same source, partition and bytes always give the same id."""
-    return hashlib.sha256(f"{source}|{logical_partition}|{checksum}".encode()).hexdigest()[:16]
+def batch_id(source: str, logical_partition: str, checksum: str, contract_fingerprint: str = "") -> str:
+    """Deterministic: the same source, partition, bytes AND contract rules always give the same id.
+    Changing a rule changes the id, so already-loaded months are reprocessed under the new rules."""
+    return hashlib.sha256(f"{source}|{logical_partition}|{checksum}|{contract_fingerprint}".encode()).hexdigest()[:16]
 
 
 def file_checksum(path: str | Path, chunk: int = 1 << 20) -> str:

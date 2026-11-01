@@ -133,11 +133,28 @@ def flagged(cfg, rows):
     (trip(trip_distance=276423.57), "suspect_distance"),
     (trip(trip_distance=0.0), "zero_distance"),
     (trip(PULocationID=264), "unknown_zone"),
+    # Jan 2025 real case: $863,372 for 1.6 mi in 5.4 min
+    (trip(fare_amount=863372.12, total_amount=863380.37,
+          tpep_dropoff_datetime=datetime(2025, 1, 15, 10, 5, 24)), "suspect_fare"),
 ])
 def test_each_flag_marks_its_row(cfg, row, flag):
     flags = {f.name: v for f in cfg.flags for k, v in flagged(cfg, [row]).items() if k == f.name}
     assert flags[flag] is True
     assert sum(flags.values()) == 1          # and nothing else
+
+
+def test_short_expensive_trip_is_held(cfg):
+    """Under a minute counts as one minute, so $950 in 8 seconds is $950/min: held."""
+    row = flagged(cfg, [trip(fare_amount=950.0, total_amount=953.5, trip_distance=0.0,
+                             tpep_dropoff_datetime=datetime(2025, 1, 15, 10, 0, 8))])
+    assert row["suspect_fare"] is True
+
+
+def test_long_expensive_trip_is_not_held(cfg):
+    """The real 189-mile, $1,309 ride: $7.20/min. Expensive but plausible."""
+    row = flagged(cfg, [trip(fare_amount=1309.2, total_amount=1311.7, trip_distance=188.88,
+                             tpep_dropoff_datetime=datetime(2025, 1, 15, 13, 1, 48))])
+    assert row["suspect_fare"] is False
 
 
 def test_clean_row_has_no_flags(cfg):

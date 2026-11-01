@@ -96,13 +96,13 @@ def run(lake: Lake, cfg: SourceConfig, input_path: str | Path, month: str,
 
     started = utcnow()
     checksum = file_checksum(input_path)
-    bid = batch_id(cfg.source, month, checksum)
+    bid = batch_id(cfg.source, month, checksum, cfg.fingerprint)
     meta = dict(batch=bid, source=cfg.source, logical_partition=month,
                 checksum=checksum, schema_version=cfg.schema_version, started_at=started)
 
-    # Same bytes already committed for this month: nothing to do.
+    # Same bytes, processed under the same rules, already committed for this month: nothing to do.
     prior = lake.manifest.latest_committed(cfg.source, month)
-    if prior and prior["source_checksum"] == checksum:
+    if prior and prior["batch_id"] == bid:
         lake.manifest.record(**meta, status="skipped")
         return RunResult(bid, "skipped", RunStats())
 

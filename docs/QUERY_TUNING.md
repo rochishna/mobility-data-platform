@@ -1,6 +1,6 @@
 # Query-Tuning Case Study
 
-Measured 2026-10-31 on 2 vCPU, Linux, DuckDB 2.0.0. Data: 2025-01, 3,475,059 trips. Median of 15 runs after a warm-up. Each tuned variant is checked to return exactly the raw answer.
+Measured 2026-11-01 on 2 vCPU, Linux, DuckDB 2.0.0. Data: 2025-01, 3,475,059 trips. Median of 15 runs after a warm-up. Each tuned variant is checked to return exactly the raw answer.
 
 Reproduce: `python benchmarks/query_tuning.py`
 
@@ -12,9 +12,9 @@ Reproduce: `python benchmarks/query_tuning.py`
 
 | Query | Question | Raw (ms) | Star (ms) | Rollup (ms) | Raw → rollup |
 |---|---|---:|---:|---:|---:|
-| Q1 daily trend | Net revenue and trip count per day for the month | 83.5 | 27.1 | 2.6 | 33× faster |
-| Q2 demand heatmap | Trips by weekday and hour, per borough | 104.4 | 44.8 | 4.6 | 23× faster |
-| Q3 zone drill-down | One zone, one day: trips and revenue by hour | 11.0 | 1.9 | 1.5 | 7× faster |
+| Q1 daily trend | Net revenue and trip count per day for the month | 159.0 | 61.9 | 3.1 | 52× faster |
+| Q2 demand heatmap | Trips by weekday and hour, per borough | 220.2 | 95.0 | 7.1 | 31× faster |
+| Q3 zone drill-down | One zone, one day: trips and revenue by hour | 21.2 | 4.5 | 1.8 | 12× faster |
 
 Q3 uses the busiest zone-day in the data (zone 161, 2025-01-23).
 
@@ -24,8 +24,8 @@ Same table, same query (Q3, star version), same rows; only the on-disk order dif
 
 | Storage order | Q3 (ms) |
 |---|---:|
-| Shuffled | 7.7 |
-| Sorted by date, zone | 1.6 |
+| Shuffled | 23.1 |
+| Sorted by date, zone | 4.8 |
 
 Sorting alone: 5× faster on the selective query.
 

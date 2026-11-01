@@ -5,7 +5,7 @@
 # (profiled on January 2025: 3,475,226 rows). Code meanings: TLC data dictionary, March 18, 2025.
 source: tlc_yellow
 format: parquet
-schema_version: 2
+schema_version: 3
 
 # raw column -> canonical name and type.
 # required: missing column = whole batch rejected; null value = row quarantined.
@@ -56,6 +56,13 @@ flags:
     expr: "trip_distance = 0"
   - name: unknown_zone                  # zones 264/265 = TLC "Unknown" / "Outside of NYC"
     expr: "pu_location_id IN (264, 265) OR do_location_id IN (264, 265)"
+  # Decision by Rochishna: more than $500 per minute (trips under a minute count as one minute) is held
+  # for human review. Caught 21 trips in Jan 2025: one $863,372 fare for 1.6 mi, and 20 zero-mile
+  # "Negotiated fare" trips of $500-950 that may be legitimate. Held trips are excluded from revenue and
+  # trip counts until approved in configs/reviews/tlc_yellow.csv. A z-score on fare was rejected: the
+  # $863K row inflated the std from $18 to $463 (masking), and without it the rule flagged 37K normal trips.
+  - name: suspect_fare
+    expr: "fare_amount > 500 * greatest(date_diff('second', pickup_datetime, dropoff_datetime) / 60.0, 1)"
 
 # Batch gates: breaching one fails the whole run and publishes nothing.
 batch_gates:

@@ -25,16 +25,22 @@ from pathlib import Path
 
 import duckdb
 
+# Trips held for review are excluded from the rollup, so raw and star must exclude them too, or the
+# answers would (correctly) fail the equality check below. Approved trips count everywhere.
+_KEY = "vendor_id, pickup_datetime, dropoff_datetime, pu_location_id, do_location_id, fare_amount, total_amount"
+COUNTED = (f"(NOT coalesce(suspect_fare, FALSE) OR ({_KEY}) IN "
+           f"(SELECT ({_KEY}) FROM review_decision WHERE decision = 'approved'))")
+
 QUERIES = {
     "Q1 daily trend": {
         "question": "Net revenue and trip count per day for the month",
         "raw": """
             SELECT CAST(pickup_datetime AS DATE) AS day,
                    count(*) FILTER (WHERE NOT is_reversal) AS trips, round(sum(total_amount), 2) AS revenue
-            FROM read_parquet('{curated}') GROUP BY 1 ORDER BY 1""",
+            FROM read_parquet('{curated}') WHERE {counted} GROUP BY 1 ORDER BY 1""",
         "star": """
             SELECT d.date AS day, count(*) FILTER (WHERE NOT f.is_reversal) AS trips, round(sum(f.total_amount), 2) AS revenue
-            FROM fact_trip f JOIN dim_date d ON d.date_key = f.pickup_date_key GROUP BY 1 ORDER BY 1""",
+            FROM fact_trip f JOIN dim_date d ON d.date_key = f.pickup_date_key WHERE {counted} GROUP BY 1 ORDER BY 1""",
         "rollup": """
             SELECT d.date AS day, sum(a.trips) AS trips, round(sum(a.net_revenue), 2) AS revenue
             FROM agg_daily_zone_hour a JOIN dim_date d ON d.date_key = a.pickup_date_key GROUP BY 1 ORDER BY 1""",
@@ -45,12 +51,12 @@ QUERIES = {
             SELECT coalesce(l.borough, 'Unknown') AS borough, isodow(t.pickup_datetime) AS dow, hour(t.pickup_datetime) AS hr,
                    count(*) FILTER (WHERE NOT t.is_reversal) AS trips
             FROM read_parquet('{curated}') t LEFT JOIN dim_location l ON l.location_id = t.pu_location_id
-            GROUP BY ALL ORDER BY ALL""",
+            WHERE {counted} GROUP BY ALL ORDER BY ALL""",
         "star": """
             SELECT l.borough, d.day_of_week AS dow, f.pickup_hour AS hr, count(*) FILTER (WHERE NOT f.is_reversal) AS trips
             FROM fact_trip f JOIN dim_date d ON d.date_key = f.pickup_date_key
                              JOIN dim_location l ON l.location_id = f.pu_location_id
-            GROUP BY ALL ORDER BY ALL""",
+            WHERE {counted} GROUP BY ALL ORDER BY ALL""",
         "rollup": """
             SELECT l.borough, d.day_of_week AS dow, a.pickup_hour AS hr, sum(a.trips) AS trips
             FROM agg_daily_zone_hour a JOIN dim_date d ON d.date_key = a.pickup_date_key
@@ -63,11 +69,11 @@ QUERIES = {
             SELECT hour(pickup_datetime) AS hr, count(*) FILTER (WHERE NOT is_reversal) AS trips, round(sum(total_amount), 2) AS revenue
             FROM read_parquet('{curated}')
             WHERE pickup_datetime >= TIMESTAMP '{day}' AND pickup_datetime < TIMESTAMP '{day}' + INTERVAL 1 DAY
-              AND pu_location_id = {zone}
+              AND pu_location_id = {zone} AND {counted}
             GROUP BY 1 ORDER BY 1""",
         "star": """
             SELECT pickup_hour AS hr, count(*) FILTER (WHERE NOT is_reversal) AS trips, round(sum(total_amount), 2) AS revenue
-            FROM fact_trip WHERE pickup_date_key = {day_key} AND pu_location_id = {zone}
+            FROM fact_trip WHERE pickup_date_key = {day_key} AND pu_location_id = {zone} AND {counted}
             GROUP BY 1 ORDER BY 1""",
         "rollup": """
             SELECT pickup_hour AS hr, sum(trips) AS trips, round(sum(net_revenue), 2) AS revenue
@@ -106,7 +112,7 @@ def main() -> None:
     con = duckdb.connect(args.db, read_only=True)
     curated = str(Path(args.lake) / "curated/tlc_yellow" / f"pickup_month={args.month}" / "data.parquet")
     zone, day = busiest_zone_and_day(con)
-    params = dict(curated=curated, zone=zone, day=day, day_key=day.replace("-", ""))
+    params = dict(curated=curated, zone=zone, day=day, day_key=day.replace("-", ""), counted=COUNTED)
     sizes = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("fact_trip", "agg_daily_zone_hour")}
 
     rows = []
@@ -123,6 +129,7 @@ def main() -> None:
     # Sort-order experiment: same query, same data, only physical order differs.
     mem = duckdb.connect()
     mem.execute(f"ATTACH '{args.db}' AS wh (READ_ONLY)")
+    mem.execute("CREATE TABLE review_decision AS SELECT * FROM wh.review_decision")
     mem.execute("CREATE TABLE sorted   AS SELECT * FROM wh.fact_trip ORDER BY pickup_date_key, pu_location_id")
     mem.execute("CREATE TABLE shuffled AS SELECT * FROM wh.fact_trip ORDER BY hash(pickup_datetime, pu_location_id, total_amount)")
     drill = QUERIES["Q3 zone drill-down"]["star"].format(**params)
