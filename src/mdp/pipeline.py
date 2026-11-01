@@ -13,6 +13,7 @@ Lake layout:
   raw/<source>/<month>/<sha256>.parquet           immutable input copies
   curated/<source>/<partition_col>=<month>/       published, validated rows
   quarantine/<source>/<month>/<batch_id>.parquet  rejected rows + reasons
+  late/<source>/<month>/<batch_id>.parquet        valid rows that belong to ANOTHER month (late arrivals)
   _meta/manifest.duckdb                           run history + commit records
 """
 from __future__ import annotations
@@ -60,6 +61,9 @@ class Lake:
 
     def quarantine_path(self, cfg: SourceConfig, month: str, bid: str) -> Path:
         return self.root / "quarantine" / cfg.source / month / f"{bid}.parquet"
+
+    def late_path(self, cfg: SourceConfig, month: str, bid: str) -> Path:
+        return self.root / "late" / cfg.source / month / f"{bid}.parquet"
 
     def read_curated(self, cfg: SourceConfig, month: str) -> pl.DataFrame:
         return pl.read_parquet(self.curated_dir(cfg, month) / "data.parquet")
@@ -125,21 +129,38 @@ def run(lake: Lake, cfg: SourceConfig, input_path: str | Path, month: str,
 
         # 3. Reject rules, then dedupe the survivors.
         valid, failed = quality.split_valid(df, cfg, month)
+
+        # Late arrivals: rows whose ONLY problem is belonging to another month are valid trips
+        # that landed in the wrong file (e.g. Dec 31 pickups in the January file). They are held
+        # aside, tagged with their real month, and the warehouse adds them to that month.
+        only_late = pl.col("quarantine_reason") == quality.LATE_RULE
+        late = failed.filter(only_late).drop("quarantine_reason")
+        failed = failed.filter(~only_late)
+
         valid, dups = quality.dedupe(valid, cfg.primary_key)
-        quarantined = pl.concat([failed, dups], how="vertical_relaxed")
-        stats.duplicate_rows = dups.height
+        late, late_dups = quality.dedupe(late, cfg.primary_key)
+        quarantined = pl.concat([failed, dups, late_dups], how="vertical_relaxed")
+        stats.duplicate_rows = dups.height + late_dups.height
+        stats.rows_late = late.height
         stats.rows_quarantined = quarantined.height
 
         if quarantined.height:
             q = lake.quarantine_path(cfg, month, bid)
             q.parent.mkdir(parents=True, exist_ok=True)
             quarantined.write_parquet(q)
+        if late.height:
+            lp = lake.late_path(cfg, month, bid)
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            late = quality.add_flags(late, cfg)
+            late.sort(late.columns, nulls_last=True).write_parquet(lp)
         if fault_point == "after_quarantine":
             raise InjectedFault(fault_point)
 
         # 4. Batch gates: fail the whole run rather than publish a bad month.
-        if stats.rows_read < cfg.min_rows:
-            raise GateError(f"{stats.rows_read} rows read, minimum is {cfg.min_rows}")
+        # Counted on rows that belong to THIS month, so a truncated file, or a file for the
+        # wrong month (everything "late"), fails instead of publishing an empty partition.
+        if valid.height < cfg.min_rows:
+            raise GateError(f"{valid.height} valid rows for {month}, minimum is {cfg.min_rows}")
         ratio = stats.rows_quarantined / max(stats.rows_read, 1)
         if ratio > cfg.max_quarantine_ratio:
             raise GateError(f"quarantine ratio {ratio:.2%} exceeds {cfg.max_quarantine_ratio:.2%}")

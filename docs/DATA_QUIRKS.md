@@ -14,7 +14,7 @@ Decisions:
 
 The obvious move, rejecting negative fares and deduplicating on a trip key, would have
 **silently corrupted revenue totals**. The negative rows are mostly reversals and adjustments, and the
-"duplicates" were charge/reversal pairs. Reject rules ended up touching only **167 rows (0.005%)**.
+"duplicates" were charge/reversal pairs. Reject rules ended up touching only **145 rows (0.004%)**, and 22 late-arriving trips are routed to their real month instead of discarded.
 
 ## Findings and decisions
 
@@ -28,7 +28,7 @@ The obvious move, rejecting negative fares and deduplicating on a trip key, woul
 | 6 | Zero distance | 90,893 | 2.62% | Cancellations, no-move trips, meter resets | **Flag** `zero_distance` |
 | 7 | Dropoff before pickup | 124 | 0.004% | Clock or device errors; duration and partition can't be trusted | **Reject** |
 | 8 | Trip over 24 hours | 20 | 0.001% | Stuck meters | **Reject** |
-| 9 | Pickup outside January | 22 | 0.001% | 21 from Dec 31, 20:47–23:56, and one at Feb 1 00:00:44: late-arriving records from adjacent months | **Reject** from this month (`pickup_in_logical_month`). They belong to another partition, not to the trash |
+| 9 | Pickup outside January | 22 | 0.001% | 21 from Dec 31, 20:47–23:56, and one at Feb 1 00:00:44: **late-arriving data**, valid trips near the month boundary that landed in the next month's file | **Hold as late arrivals**: kept in `late/`, tagged with their real month, and added to that month by the warehouse unless its own file already has the trip. Decision by Rochishna: these are real trips, so they belong in the data, in the right month |
 | 10 | Zero-duration trips | 1,927 | 0.06% | Same population as zero distance | **Keep** |
 | 11 | passenger_count = 0 | 24,656 | 0.71% | Driver didn't enter a count | **Keep** |
 | 12 | Zones 264/265 | 28,357 | 0.82% | Dictionary: "Unknown" and "Outside of NYC" | **Flag** `unknown_zone` |
@@ -39,11 +39,11 @@ The obvious move, rejecting negative fares and deduplicating on a trip key, woul
 
 ## Gates
 
-Reject rules quarantined 167 rows in January (0.005%). The batch gate is set at **0.1%**, 20× that,
+Reject rules quarantined 145 rows in January (0.004%). The batch gate is set at **0.1%**, 20× that,
 so a normal month passes, while a source change that breaks a real share of rows fails loudly and
-publishes nothing. `min_rows: 1000` stops a truncated download from replacing a month.
+publishes nothing. `min_rows: 1000` counts rows that belong to the month, so a truncated download, or a file for the wrong
+month (every row "late"), fails instead of replacing a month.
 
 ## Open questions
 
 - Are unpaired negative Flex Fare rows adjustments to trips in another month? Needs February data.
-- Should late-arriving rows (#9) be routed to their correct month instead of quarantined?

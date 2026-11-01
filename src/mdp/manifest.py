@@ -57,6 +57,7 @@ class RunStats:
     rows_published: int = 0
     rows_quarantined: int = 0
     duplicate_rows: int = 0
+    rows_late: int = 0
     additive_columns: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -65,6 +66,8 @@ class Manifest:
         self.path = str(path)
         with duckdb.connect(self.path) as con:
             con.execute(_SCHEMA)
+            # Schema migration for manifests created before late-arrival handling.
+            con.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS rows_late BIGINT DEFAULT 0")
 
     def latest_committed(self, source: str, logical_partition: str) -> dict | None:
         with duckdb.connect(self.path) as con:
@@ -82,9 +85,12 @@ class Manifest:
         s = stats or RunStats()
         with duckdb.connect(self.path) as con:
             con.execute(
-                "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO runs (batch_id, source, logical_partition, source_checksum, schema_version,
+                       status, rows_read, rows_published, rows_quarantined, duplicate_rows, rows_late,
+                       additive_columns, error, started_at, finished_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [batch, source, logical_partition, checksum, schema_version, status,
-                 s.rows_read, s.rows_published, s.rows_quarantined, s.duplicate_rows,
+                 s.rows_read, s.rows_published, s.rows_quarantined, s.duplicate_rows, s.rows_late,
                  json.dumps(list(s.additive_columns)), error, started_at, utcnow()],
             )
 

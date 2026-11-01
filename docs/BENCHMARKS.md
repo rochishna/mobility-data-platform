@@ -31,4 +31,9 @@ clean run by SHA-256 of its Arrow IPC bytes.
 | unknown_zone | 28,354 |
 | suspect_distance | 121 |
 
+Note: these runs predate late-arrival routing. With it, the same file publishes 3,475,059 rows, holds 22 as late
+arrivals, and quarantines 145. The published January partition is unchanged.
+
+Query performance: see [QUERY_TUNING.md](QUERY_TUNING.md).
+
 Reproduce: `python -m mdp.ingest --contract configs/sources/tlc_yellow.yaml --file <file> --month 2025-01 --lake lake/`

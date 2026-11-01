@@ -40,7 +40,8 @@ quality_rules:
     expr: "dropoff_datetime >= pickup_datetime"
   - name: duration_under_24h            # 20 rows; a taxi trip over a day is a stuck meter
     expr: "dropoff_datetime - pickup_datetime <= INTERVAL 24 HOUR"
-  - name: pickup_in_logical_month       # 22 rows: late Dec 31 and one Feb 1 00:00 pickup
+  - name: pickup_in_logical_month       # 22 rows: NOT quarantined. The pipeline routes rows failing only
+                                        # this rule to late/ so the warehouse adds them to their real month.
     expr: "pickup_month = :logical_partition"
 
 # FLAG: the row is a real record, but analysts must know about this. Kept, with a boolean column.

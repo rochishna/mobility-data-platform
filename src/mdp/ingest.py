@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{result.status}: batch {result.batch_id}")
     if result.status == "committed":
         print(f"  read {s.rows_read:,} · published {s.rows_published:,} · "
-              f"quarantined {s.rows_quarantined:,} (duplicates {s.duplicate_rows:,})")
+              f"late arrivals {s.rows_late:,} · quarantined {s.rows_quarantined:,} (duplicates {s.duplicate_rows:,})")
         if s.additive_columns:
             print(f"  additive columns not loaded: {', '.join(s.additive_columns)}")
     return 0

@@ -51,11 +51,14 @@ def test_clean_run_commits(tmp_path, cfg, jan_file):
     lake = Lake(tmp_path / "lake")
     result = run(lake, cfg, jan_file, "2025-01")
     assert result.status == "committed"
-    assert (result.stats.rows_read, result.stats.rows_published, result.stats.rows_quarantined) == (63, 60, 3)
-    assert result.stats.duplicate_rows == 1
+    s = result.stats
+    assert (s.rows_read, s.rows_published, s.rows_late, s.rows_quarantined) == (63, 60, 1, 2)
+    assert s.duplicate_rows == 1
     assert lake.read_curated(cfg, "2025-01").height == 60
     q = pl.read_parquet(lake.quarantine_path(cfg, "2025-01", result.batch_id))
-    assert set(q["quarantine_reason"]) == {"dropoff_not_before_pickup", "duplicate_key", "pickup_in_logical_month"}
+    assert set(q["quarantine_reason"]) == {"dropoff_not_before_pickup", "duplicate_key"}
+    late = pl.read_parquet(lake.late_path(cfg, "2025-01", result.batch_id))
+    assert late["pickup_month"].to_list() == ["2024-12"]          # held aside with its real month
 
 
 def test_batch_id_is_deterministic(tmp_path, cfg, jan_file):
@@ -138,7 +141,7 @@ def test_same_file_for_different_month_is_not_skipped(tmp_path, cfg):
     rows = clean_trips(5)
     path = write(tmp_path, "f.parquet", rows)
     run(lake, cfg, path, "2025-01")
-    with pytest.raises(GateError):          # all 5 rows are January -> 100% quarantined for Feb
+    with pytest.raises(GateError, match="valid rows"):   # all 5 rows are January: nothing belongs to Feb
         run(lake, cfg, path, "2025-02")
 
 

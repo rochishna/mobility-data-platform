@@ -16,6 +16,9 @@ from .config import SourceConfig
 
 _MONTH = re.compile(r"^\d{4}-\d{2}$")
 
+# Rule name the pipeline treats as "late arrival" rather than "bad row".
+LATE_RULE = "pickup_in_logical_month"
+
 
 def rules_for(cfg: SourceConfig, logical_partition: str) -> list[tuple[str, str]]:
     if not _MONTH.match(logical_partition):
