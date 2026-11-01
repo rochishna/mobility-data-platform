@@ -220,3 +220,20 @@ def test_review_cli_round_trip(setup, tmp_path):
     assert review.apply(todo, build.reviews) == (1, 0)
     build()
     assert q("SELECT count(*) FROM review_queue") == [(0,)]
+
+
+def test_review_apply_onto_existing_file_stays_readable(setup, tmp_path):
+    """Regression: the committed review file starts as a header written with LF; apply() appended CRLF rows,
+    and the mixed file could not be parsed. Reproduce that exact sequence."""
+    from mdp import review
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(10) + [bad_fare()], "2025-01")
+    build.reviews.write_text(",".join(review.FIELDS) + "\n")               # header only, LF, like the repo file
+    build()
+    todo = tmp_path / "todo.csv"
+    review.export(str(lake.root.parent / "wh.duckdb"), todo)
+    todo.write_text(todo.read_text().replace(",,,,", ",rejected,Rochishna,,", 1))
+    review.apply(todo, build.reviews)
+    assert b"\r" not in build.reviews.read_bytes()
+    build()
+    assert q("SELECT decision FROM review_decision") == [("rejected",)]

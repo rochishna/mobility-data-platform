@@ -242,7 +242,10 @@ def _load_reviews(con: duckdb.DuckDBPyConnection, reviews_csv: str | Path | None
     con.execute("DELETE FROM review_decision")
     if not reviews_csv or not Path(reviews_csv).exists():
         return "none"
-    con.execute("INSERT INTO review_decision SELECT * FROM read_csv(?, header=true, columns={"
+    # Format given explicitly rather than sniffed: a review file is hand-edited, so be strict about
+    # structure and forgiving about line endings.
+    con.execute("INSERT INTO review_decision SELECT * FROM read_csv(?, header=true, delim=',', quote='\"', "
+                "escape='\"', columns={"
                 "'vendor_id':'INTEGER','pickup_datetime':'TIMESTAMP','dropoff_datetime':'TIMESTAMP',"
                 "'pu_location_id':'INTEGER','do_location_id':'INTEGER','fare_amount':'DOUBLE','total_amount':'DOUBLE',"
                 "'decision':'VARCHAR','reviewer':'VARCHAR','reviewed_on':'DATE','note':'VARCHAR'})",

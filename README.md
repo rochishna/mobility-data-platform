@@ -35,7 +35,7 @@ Profiling January 2025 overturned the obvious rules. 4% of fares are negative, b
 Flex Fare adjustments, not errors. The "duplicate" trips were charge/reversal pairs that net to $0, so
 deduplicating them would have corrupted revenue. The contract now **rejects** only rows whose core facts are
 unusable (145 of 3.47M), routes 22 **late-arriving** trips to their real month, **holds** 21 anomalous fares for
-human review (one was $863,372 for a 1.6-mile ride), and **flags** real-but-unusual records instead. Evidence for every decision:
+human review (one was $863,372 for a 1.6-mile ride; all 21 were reviewed and rejected), and **flags** real-but-unusual records instead. Evidence for every decision:
 [`docs/DATA_QUIRKS.md`](docs/DATA_QUIRKS.md).
 
 ## How a source is defined
@@ -55,7 +55,7 @@ column is filled with nulls. Unknown new columns are allowed, recorded in the ru
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev,dashboard]"
-pytest                                                  # 97 tests, no download needed
+pytest                                                  # 98 tests, no download needed
 
 python scripts/download.py 2025-01
 python -m mdp.profile data/raw/yellow_tripdata_2025-01.parquet 2025-01 --out docs/profile_2025-01.md

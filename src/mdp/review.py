@@ -63,7 +63,9 @@ def apply(todo: str | Path, reviews: str | Path) -> tuple[int, int]:
             applied += 1
     new_file = not Path(reviews).exists()
     with open(reviews, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
+        # "\n", not csv's default "\r\n": appending CRLF rows to an LF file produced mixed line
+        # endings the warehouse's CSV reader could not parse (found applying the first real review).
+        w = csv.DictWriter(f, fieldnames=FIELDS, lineterminator="\n")
         if new_file:
             w.writeheader()
         w.writerows(out)
