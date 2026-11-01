@@ -45,7 +45,26 @@ def test_loads_star_schema(setup):
     assert build() == {"2025-01": 21}
     assert q("SELECT count(*) FROM fact_trip") == [(21,)]
     assert q("SELECT sum(trips) FROM agg_daily_zone_hour") == [(20,)]          # reversal not counted as a trip
-    assert q("SELECT round(sum(total_amount), 2) FROM fact_trip") == q("SELECT round(sum(revenue), 2) FROM agg_daily_zone_hour")
+    assert q("SELECT round(sum(total_amount), 2) FROM fact_trip") == q("SELECT round(sum(net_revenue), 2) FROM agg_daily_zone_hour")
+
+
+def test_gross_and_net_revenue(setup):
+    """Gross = charges only. Net = after reversals. Decision by Rochishna: show both."""
+    lake, cfg, ingest, build, q = setup
+    rows = clean_trips(3)                                               # 3 x $24.00
+    rows.append({**rows[0], "fare_amount": -18.5, "total_amount": -24.0})   # a reversal of trip 0
+    ingest("jan.parquet", rows, "2025-01")
+    build()
+    assert q("SELECT sum(gross_revenue), sum(net_revenue) FROM agg_daily_zone_hour") == [(72.0, 48.0)]
+
+
+def test_zone_names_come_from_lookup(setup, tmp_path, monkeypatch):
+    lake, cfg, ingest, build, q = setup
+    ingest("jan.parquet", clean_trips(3) + [trip(PULocationID=132)], "2025-01")
+    warehouse.build(lake.root, tmp_path / "named.duckdb", CONTRACT, "configs/reference/taxi_zone_lookup.csv")
+    with duckdb.connect(str(tmp_path / "named.duckdb"), read_only=True) as con:
+        assert con.execute("SELECT borough, zone FROM dim_location WHERE location_id = 132").fetchall() == [("Queens", "JFK Airport")]
+        assert con.execute("SELECT count(*) FROM dim_location").fetchall() == [(265,)]
 
 
 def test_every_fact_row_joins_to_every_dimension(setup):

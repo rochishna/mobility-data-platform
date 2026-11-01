@@ -36,7 +36,7 @@ QUERIES = {
             SELECT d.date AS day, count(*) FILTER (WHERE NOT f.is_reversal) AS trips, round(sum(f.total_amount), 2) AS revenue
             FROM fact_trip f JOIN dim_date d ON d.date_key = f.pickup_date_key GROUP BY 1 ORDER BY 1""",
         "rollup": """
-            SELECT d.date AS day, sum(a.trips) AS trips, round(sum(a.revenue), 2) AS revenue
+            SELECT d.date AS day, sum(a.trips) AS trips, round(sum(a.net_revenue), 2) AS revenue
             FROM agg_daily_zone_hour a JOIN dim_date d ON d.date_key = a.pickup_date_key GROUP BY 1 ORDER BY 1""",
     },
     "Q2 demand heatmap": {
@@ -70,7 +70,7 @@ QUERIES = {
             FROM fact_trip WHERE pickup_date_key = {day_key} AND pu_location_id = {zone}
             GROUP BY 1 ORDER BY 1""",
         "rollup": """
-            SELECT pickup_hour AS hr, sum(trips) AS trips, round(sum(revenue), 2) AS revenue
+            SELECT pickup_hour AS hr, sum(trips) AS trips, round(sum(net_revenue), 2) AS revenue
             FROM agg_daily_zone_hour WHERE pickup_date_key = {day_key} AND pu_location_id = {zone}
             GROUP BY 1 ORDER BY 1""",
     },

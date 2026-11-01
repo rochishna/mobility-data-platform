@@ -4,7 +4,9 @@ A fault-tolerant, metadata-driven ingestion platform for NYC mobility data (TLC 
 
 > **Status:** ingestion and the star-schema warehouse are done, tested, and run on real data:
 > 3.47M January 2025 trips in 5.5 s, crash-and-rerun output byte-identical to a clean run, and dashboard
-> queries 30–40× faster from a pre-aggregated rollup. The Dash app and AWS deployment come next.
+> queries 23–33× faster from a pre-aggregated rollup, served by a Plotly Dash dashboard. AWS deployment comes next.
+
+![Dashboard](docs/img/dashboard.png)
 
 ## What it guarantees
 
@@ -48,8 +50,8 @@ column is filled with nulls. Unknown new columns are allowed, recorded in the ru
 
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-pytest                                                  # 78 tests, no download needed
+pip install -e ".[dev,dashboard]"
+pytest                                                  # 87 tests, no download needed
 
 python scripts/download.py 2025-01
 python -m mdp.profile data/raw/yellow_tripdata_2025-01.parquet 2025-01 --out docs/profile_2025-01.md
@@ -57,7 +59,18 @@ python -m mdp.ingest --contract configs/sources/tlc_yellow.yaml \
     --file data/raw/yellow_tripdata_2025-01.parquet --month 2025-01 --lake lake/
 python -m mdp.warehouse --lake lake/ --db warehouse.duckdb      # star schema + rollup
 python benchmarks/query_tuning.py                              # writes docs/QUERY_TUNING.md
+python -m mdp.dashboard --db warehouse.duckdb                  # http://127.0.0.1:8050
 ```
+
+## Dashboard
+
+`python -m mdp.dashboard` serves four views, each reading the rollup: KPIs, daily gross vs net revenue (the shaded
+band is money reversed or refunded), a weekday × hour demand heatmap, top zones by net revenue per trip, and a
+zone/day drill-down. Everything filters by borough.
+
+Revenue appears twice by design: **gross** (all charges) and **net** (after reversals and refunds). Neither is
+profit; the data has no costs. What it shows for January 2025: JFK is only the 4th busiest pickup zone but earns
+the most, $77 net per trip against $24 for Midtown Center.
 
 ## Warehouse
 
@@ -87,6 +100,8 @@ src/mdp/manifest.py     run history and commit records
 src/mdp/pipeline.py     the ingestion run: land → check → quarantine → gate → publish → commit
 src/mdp/ingest.py       command-line entry point
 src/mdp/warehouse.py    star schema + rollup from committed partitions, late-arrival merge
+src/mdp/dashboard.py    Plotly Dash app: query layer, figures, layout
+configs/reference/      TLC taxi zone lookup (zone and borough names)
 benchmarks/             query-tuning case study
 docs/DATA_QUIRKS.md     findings from real data and the decision for each
 ```
@@ -103,4 +118,4 @@ Lake layout: `raw/` (immutable inputs) · `curated/<source>/pickup_month=YYYY-MM
 5. ⬜ NOAA weather as a second source (config only)
 6. ✅ Star schema + query-tuning case study (DuckDB locally; Redshift with the AWS step)
 7. ⬜ AWS deployment (S3, Glue, Redshift) with Terraform
-8. ⬜ Plotly Dash analytics app
+8. ✅ Plotly Dash analytics app

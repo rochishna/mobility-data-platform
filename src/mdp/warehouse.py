@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS agg_daily_zone_hour (
     pickup_hour     INTEGER,
     pu_location_id  INTEGER,
     trips           BIGINT,     -- trip records excluding reversal rows
-    revenue         DOUBLE,     -- net: charges plus reversals
+    gross_revenue   DOUBLE,     -- charges only: sum of positive totals
+    net_revenue     DOUBLE,     -- what was actually collected: charges plus reversals/refunds
     total_distance  DOUBLE,     -- excludes suspect distances
     total_minutes   DOUBLE
 );
@@ -185,6 +186,7 @@ def load_month(con: duckdb.DuckDBPyConnection, lake: Lake, cfg: SourceConfig, mo
             INSERT INTO agg_daily_zone_hour
             SELECT pickup_month, pickup_date_key, pickup_hour, pu_location_id,
                    count(*) FILTER (WHERE NOT is_reversal),
+                   coalesce(sum(total_amount) FILTER (WHERE total_amount > 0), 0),
                    sum(total_amount),
                    sum(trip_distance) FILTER (WHERE NOT suspect_distance),
                    sum(duration_min)
